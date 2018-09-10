@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 from __future__ import absolute_import
 from __future__ import division
@@ -23,10 +28,10 @@ import time
 import zipfile
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
-from datetime import datetime
 
 from airflow.dag.base_dag import BaseDag, BaseDagBag
 from airflow.exceptions import AirflowException
+from airflow.utils import timezone
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 
@@ -172,13 +177,30 @@ def list_py_file_paths(directory, safe_mode=True):
     elif os.path.isfile(directory):
         return [directory]
     elif os.path.isdir(directory):
-        patterns = []
+        patterns_by_dir = {}
         for root, dirs, files in os.walk(directory, followlinks=True):
-            ignore_file = [f for f in files if f == '.airflowignore']
-            if ignore_file:
-                f = open(os.path.join(root, ignore_file[0]), 'r')
-                patterns += [p for p in f.read().split('\n') if p]
-                f.close()
+            patterns = patterns_by_dir.get(root, [])
+            ignore_file = os.path.join(root, '.airflowignore')
+            if os.path.isfile(ignore_file):
+                with open(ignore_file, 'r') as f:
+                    # If we have new patterns create a copy so we don't change
+                    # the previous list (which would affect other subdirs)
+                    patterns = patterns + [p for p in f.read().split('\n') if p]
+
+            # If we can ignore any subdirs entirely we should - fewer paths
+            # to walk is better. We have to modify the ``dirs`` array in
+            # place for this to affect os.walk
+            dirs[:] = [
+                d
+                for d in dirs
+                if not any(re.search(p, os.path.join(root, d)) for p in patterns)
+            ]
+
+            # We want patterns defined in a parent folder's .airflowignore to
+            # apply to subdirs too
+            for d in dirs:
+                patterns_by_dir[os.path.join(root, d)] = patterns
+
             for f in files:
                 try:
                     file_path = os.path.join(root, f)
@@ -376,7 +398,7 @@ class DagFileProcessorManager(LoggingMixin):
         being processed
         """
         if file_path in self._processors:
-            return (datetime.utcnow() - self._processors[file_path].start_time) \
+            return (timezone.utcnow() - self._processors[file_path].start_time)\
                 .total_seconds()
         return None
 
@@ -451,7 +473,7 @@ class DagFileProcessorManager(LoggingMixin):
     def heartbeat(self):
         """
         This should be periodically called by the scheduler. This method will
-        kick of new processes to process DAG definition files and read the
+        kick off new processes to process DAG definition files and read the
         results from the finished processors.
 
         :return: a list of SimpleDags that were produced by processors that
@@ -466,7 +488,7 @@ class DagFileProcessorManager(LoggingMixin):
         for file_path, processor in self._processors.items():
             if processor.done:
                 self.log.info("Processor for %s finished", file_path)
-                now = datetime.utcnow()
+                now = timezone.utcnow()
                 finished_processors[file_path] = processor
                 self._last_runtime[file_path] = (now -
                                                  processor.start_time).total_seconds()
@@ -475,6 +497,12 @@ class DagFileProcessorManager(LoggingMixin):
             else:
                 running_processors[file_path] = processor
         self._processors = running_processors
+
+        self.log.debug("%s/%s scheduler processes running",
+                       len(self._processors), self._parallelism)
+
+        self.log.debug("%s file paths queued for processing",
+                       len(self._file_path_queue))
 
         # Collect all the DAGs that were found in the processed files
         simple_dags = []
@@ -494,13 +522,13 @@ class DagFileProcessorManager(LoggingMixin):
             # If the file path is already being processed, or if a file was
             # processed recently, wait until the next batch
             file_paths_in_progress = self._processors.keys()
-            now = datetime.utcnow()
+            now = timezone.utcnow()
             file_paths_recently_processed = []
             for file_path in self._file_paths:
                 last_finish_time = self.get_last_finish_time(file_path)
                 if (last_finish_time is not None and
-                            (now - last_finish_time).total_seconds() <
-                            self._process_file_interval):
+                    (now - last_finish_time).total_seconds() <
+                        self._process_file_interval):
                     file_paths_recently_processed.append(file_path)
 
             files_paths_at_run_limit = [file_path
@@ -527,7 +555,7 @@ class DagFileProcessorManager(LoggingMixin):
 
         # Start more processors if we have enough slots and files to process
         while (self._parallelism - len(self._processors) > 0 and
-                       len(self._file_path_queue) > 0):
+               len(self._file_path_queue) > 0):
             file_path = self._file_path_queue.pop(0)
             processor = self._processor_factory(file_path)
 
